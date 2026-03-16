@@ -257,6 +257,12 @@ private:
      * Internal functions
      ******************************************************************/
 
+    void setTunerGainMode(sdrplay_api_TunerSelectT tuner, sdrplay_api_RxChannelParamsT *chParams, const bool automatic);
+
+    void setTunerGain(sdrplay_api_TunerSelectT tuner, sdrplay_api_RxChannelParamsT *chParams, const std::string &name, const double value);
+
+    void setTunerFrequency(sdrplay_api_TunerSelectT tuner, sdrplay_api_RxChannelParamsT *chParams, const double frequency);
+
     double getInputSampleRateAndDecimation(uint32_t output_sample_rate, unsigned int *decM, unsigned int *decEnable, sdrplay_api_If_kHzT *ifType) const;
 
     static sdrplay_api_Bw_MHzT getBwEnumForRate(double output_sample_rate);
@@ -287,6 +293,8 @@ private:
     sdrplay_api_DeviceT device;
     sdrplay_api_DeviceParamsT *deviceParams;
     sdrplay_api_RxChannelParamsT *chParams;
+    sdrplay_api_TunerSelectT tunerDT[2];
+    sdrplay_api_RxChannelParamsT *chParamsDT[2];
     int hwVer;
     std::string serNo;
     std::string cacheKey;

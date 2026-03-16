@@ -237,7 +237,7 @@ SoapySDR::Stream *SoapySDRPlay::setupStream(const int direction,
     size_t nchannels = device.hwVer == SDRPLAY_RSPduo_ID && device.rspDuoMode == sdrplay_api_RspDuoMode_Dual_Tuner ? 2 : 1;
 
     // check the channel configuration
-    if (channels.size() > 1 or (channels.size() > 0 and channels.at(0) >= nchannels))
+    if (channels.size() > 1 || (channels.size() > 0 && channels.at(0) >= nchannels))
     {
        throw std::runtime_error("setupStream invalid channel selection");
     }
@@ -370,11 +370,56 @@ int SoapySDRPlay::activateStream(SoapySDR::Stream *stream,
     deviceParams->devParams->mode = sdrplay_api_BULK;
 #endif
 
+    sdrplay_api_RxChannelParamsT rxChannelBParams = *chParams;
+    if (hwVer == SDRPLAY_RSPduo_ID && device.rspDuoMode == sdrplay_api_RspDuoMode_Dual_Tuner)
+    {
+        rxChannelBParams = *chParamsDT[1];
+    }
+
     err = sdrplay_api_Init(device.dev, &cbFns, (void *)this);
     if (err != sdrplay_api_Success)
     {
         SoapySDR_logf(SOAPY_SDR_ERROR, "error in activateStream() - Init() failed: %s", sdrplay_api_GetErrorString(err));
         return SOAPY_SDR_NOT_SUPPORTED;
+    }
+
+    if (hwVer == SDRPLAY_RSPduo_ID && device.rspDuoMode == sdrplay_api_RspDuoMode_Dual_Tuner)
+    {
+        sdrplay_api_ReasonForUpdateT reason = sdrplay_api_Update_None;
+        if (chParamsDT[1]->rspDuoTunerParams.tuner1AmPortSel != rxChannelBParams.rspDuoTunerParams.tuner1AmPortSel)
+        {
+            chParamsDT[1]->rspDuoTunerParams.tuner1AmPortSel = rxChannelBParams.rspDuoTunerParams.tuner1AmPortSel;
+            reason = (sdrplay_api_ReasonForUpdateT)(reason | sdrplay_api_Update_RspDuo_AmPortSelect);
+        }
+        if (chParamsDT[1]->ctrlParams.agc.enable != rxChannelBParams.ctrlParams.agc.enable)
+        {
+            chParamsDT[1]->ctrlParams.agc.enable = rxChannelBParams.ctrlParams.agc.enable;
+            reason = (sdrplay_api_ReasonForUpdateT)(reason | sdrplay_api_Update_Ctrl_Agc);
+        }
+        if (chParamsDT[1]->tunerParams.gain.gRdB != rxChannelBParams.tunerParams.gain.gRdB)
+        {
+            chParamsDT[1]->tunerParams.gain.gRdB = rxChannelBParams.tunerParams.gain.gRdB;
+            reason = (sdrplay_api_ReasonForUpdateT)(reason | sdrplay_api_Update_Tuner_Gr);
+        }
+        if (chParamsDT[1]->tunerParams.gain.LNAstate != rxChannelBParams.tunerParams.gain.LNAstate)
+        {
+            chParamsDT[1]->tunerParams.gain.LNAstate = rxChannelBParams.tunerParams.gain.LNAstate;
+            reason = (sdrplay_api_ReasonForUpdateT)(reason | sdrplay_api_Update_Tuner_Gr);
+        }
+        if (chParamsDT[1]->tunerParams.rfFreq.rfHz != rxChannelBParams.tunerParams.rfFreq.rfHz)
+        {
+            chParamsDT[1]->tunerParams.rfFreq.rfHz = rxChannelBParams.tunerParams.rfFreq.rfHz;
+            reason = (sdrplay_api_ReasonForUpdateT)(reason | sdrplay_api_Update_Tuner_Frf);
+        }
+        if (reason != sdrplay_api_Update_None)
+        {
+            sdrplay_api_ErrT err = sdrplay_api_Update(device.dev, sdrplay_api_Tuner_B, reason, sdrplay_api_Update_Ext1_None);
+            if (err != sdrplay_api_Success)
+            {
+                SoapySDR_logf(SOAPY_SDR_ERROR, "error in activateStream() - RSPduo Update() failed: %s", sdrplay_api_GetErrorString(err));
+                return SOAPY_SDR_NOT_SUPPORTED;
+            }
+        }
     }
 
     streamActive = true;

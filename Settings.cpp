@@ -374,12 +374,20 @@ void SoapySDRPlay::setAntenna(const int direction, const size_t channel, const s
                 // when changing tuner/antenna
                 sdrplay_api_DevParamsT devParams = *deviceParams->devParams;
                 sdrplay_api_RxChannelParamsT rxChannelParams = *chParams;
+                sdrplay_api_TunerSelectT rxTunerDT[2] = {tunerDT[0], tunerDT[1]};
+                sdrplay_api_RxChannelParamsT rxChannelParamsDT[2] = {*chParamsDT[0], *chParamsDT[1]};
                 sdrplay_api_TunerSelectT other_tuner = (device.tuner == sdrplay_api_Tuner_A) ? sdrplay_api_Tuner_B : sdrplay_api_Tuner_A;
                 selectDevice(other_tuner, device.rspDuoMode,
                              device.rspDuoSampleFreq, nullptr);
                 // restore device and tuner settings
                 *deviceParams->devParams = devParams;
                 *chParams = rxChannelParams;
+                tunerDT[0] = rxTunerDT[1];
+                tunerDT[1] = rxTunerDT[0];
+                chParamsDT[0] = tunerDT[0] == sdrplay_api_Tuner_B ? deviceParams->rxChannelB : deviceParams->rxChannelA;
+                chParamsDT[1] = tunerDT[1] == sdrplay_api_Tuner_B ? deviceParams->rxChannelB : deviceParams->rxChannelA;
+                *chParamsDT[0]  = rxChannelParamsDT[1];
+                *chParamsDT[1]  = rxChannelParamsDT[0];
             }
         }
     }
@@ -516,13 +524,30 @@ void SoapySDRPlay::setGainMode(const int direction, const size_t channel, const 
 {
     std::lock_guard <std::mutex> lock(_general_state_mutex);
 
+    if (hwVer == SDRPLAY_RSPduo_ID && device.rspDuoMode == sdrplay_api_RspDuoMode_Dual_Tuner)
+    {
+        if (channel > 0 && tunerDT[0] == tunerDT[1])
+        {
+            tunerDT[0] = sdrplay_api_Tuner_A;
+            tunerDT[1] = sdrplay_api_Tuner_B;
+            chParamsDT[0] = deviceParams->rxChannelA;
+            chParamsDT[1] = deviceParams->rxChannelB;
+        }
+        setTunerGainMode(tunerDT[channel], chParamsDT[channel], automatic);
+    } else {
+        setTunerGainMode(device.tuner, chParams, automatic);
+    }
+}
+
+void SoapySDRPlay::setTunerGainMode(sdrplay_api_TunerSelectT tuner, sdrplay_api_RxChannelParamsT *chParams, const bool automatic)
+{
     sdrplay_api_AgcControlT agc_control = automatic ? sdrplay_api_AGC_CTRL_EN : sdrplay_api_AGC_DISABLE;
     if (chParams->ctrlParams.agc.enable != agc_control)
     {
         chParams->ctrlParams.agc.enable = agc_control;
         if (streamActive)
         {
-            sdrplay_api_Update(device.dev, device.tuner, sdrplay_api_Update_Ctrl_Agc, sdrplay_api_Update_Ext1_None);
+            sdrplay_api_Update(device.dev, tuner, sdrplay_api_Update_Ctrl_Agc, sdrplay_api_Update_Ext1_None);
         }
     }
 }
@@ -531,13 +556,34 @@ bool SoapySDRPlay::getGainMode(const int direction, const size_t channel) const
 {
     std::lock_guard <std::mutex> lock(_general_state_mutex);
 
-    return chParams->ctrlParams.agc.enable != sdrplay_api_AGC_DISABLE;
+    if (hwVer == SDRPLAY_RSPduo_ID && device.rspDuoMode == sdrplay_api_RspDuoMode_Dual_Tuner) {
+        return chParamsDT[channel]->ctrlParams.agc.enable != sdrplay_api_AGC_DISABLE;
+    } else {
+        return chParams->ctrlParams.agc.enable != sdrplay_api_AGC_DISABLE;
+    }
 }
 
 void SoapySDRPlay::setGain(const int direction, const size_t channel, const std::string &name, const double value)
 {
     std::lock_guard <std::mutex> lock(_general_state_mutex);
 
+   if (hwVer == SDRPLAY_RSPduo_ID && device.rspDuoMode == sdrplay_api_RspDuoMode_Dual_Tuner && channel > 0)
+   {
+      if (channel > 0 && tunerDT[0] == tunerDT[1])
+      {
+         tunerDT[0] = sdrplay_api_Tuner_A;
+         tunerDT[1] = sdrplay_api_Tuner_B;
+         chParamsDT[0] = deviceParams->rxChannelA;
+         chParamsDT[1] = deviceParams->rxChannelB;
+      }
+      setTunerGain(tunerDT[channel], chParamsDT[channel], name, value);
+   } else {
+      setTunerGain(device.tuner, chParams, name, value);
+   }
+}
+
+void SoapySDRPlay::setTunerGain(sdrplay_api_TunerSelectT tuner, sdrplay_api_RxChannelParamsT *chParams, const std::string &name, const double value)
+{
    bool doUpdate = false;
 
    if (name == "IFGR")
@@ -566,7 +612,7 @@ void SoapySDRPlay::setGain(const int direction, const size_t channel, const std:
    if ((doUpdate == true) && (streamActive))
    {
       gr_changed = 0;
-      sdrplay_api_ErrT err = sdrplay_api_Update(device.dev, device.tuner, sdrplay_api_Update_Tuner_Gr, sdrplay_api_Update_Ext1_None);
+      sdrplay_api_ErrT err = sdrplay_api_Update(device.dev, tuner, sdrplay_api_Update_Tuner_Gr, sdrplay_api_Update_Ext1_None);
       if (err != sdrplay_api_Success)
       {
          SoapySDR_logf(SOAPY_SDR_WARNING, "sdrplay_api_Update(Tuner_Gr) Error: %s", sdrplay_api_GetErrorString(err));
@@ -590,13 +636,25 @@ double SoapySDRPlay::getGain(const int direction, const size_t channel, const st
 {
     std::lock_guard <std::mutex> lock(_general_state_mutex);
 
-   if (name == "IFGR")
+   if (hwVer == SDRPLAY_RSPduo_ID && device.rspDuoMode == sdrplay_api_RspDuoMode_Dual_Tuner)
    {
-       return chParams->tunerParams.gain.gRdB;
-   }
-   else if (name == "RFGR")
-   {
-      return chParams->tunerParams.gain.LNAstate;
+       if (name == "IFGR")
+       {
+           return chParamsDT[channel]->tunerParams.gain.gRdB;
+       }
+       else if (name == "RFGR")
+       {
+          return chParamsDT[channel]->tunerParams.gain.LNAstate;
+       }
+   } else {
+       if (name == "IFGR")
+       {
+           return chParams->tunerParams.gain.gRdB;
+       }
+       else if (name == "RFGR")
+       {
+          return chParams->tunerParams.gain.LNAstate;
+       }
    }
 
    return 0;
@@ -671,30 +729,20 @@ void SoapySDRPlay::setFrequency(const int direction,
             SoapySDR_logf(SOAPY_SDR_WARNING, "RF center frequency out of range - frequency=%lg", frequency);
             return;
          }
-         if (chParams->tunerParams.rfFreq.rfHz != (uint32_t)frequency)
+         if (hwVer == SDRPLAY_RSPduo_ID && device.rspDuoMode == sdrplay_api_RspDuoMode_Dual_Tuner)
          {
-            chParams->tunerParams.rfFreq.rfHz = (uint32_t)frequency;
-            if (streamActive)
+            if (channel > 0 && tunerDT[0] == tunerDT[1])
             {
-               rf_changed = 0;
-               sdrplay_api_ErrT err = sdrplay_api_Update(device.dev, device.tuner, sdrplay_api_Update_Tuner_Frf, sdrplay_api_Update_Ext1_None);
-               if (err != sdrplay_api_Success)
-               {
-                  SoapySDR_logf(SOAPY_SDR_WARNING, "sdrplay_api_Update(Tuner_FrF) Error: %s", sdrplay_api_GetErrorString(err));
-                  return;
-               }
-               for (int i = 0; i < updateTimeout; ++i)
-               {
-                  if (rf_changed != 0) {
-                     break;
-                  }
-                  std::this_thread::sleep_for(std::chrono::milliseconds(1));
-               }
-               if (rf_changed == 0)
-               {
-                  SoapySDR_log(SOAPY_SDR_WARNING, "RF center frequency update timeout.");
-               }
+               tunerDT[0] = sdrplay_api_Tuner_A;
+               tunerDT[1] = sdrplay_api_Tuner_B;
+               chParamsDT[0] = deviceParams->rxChannelA;
+               chParamsDT[1] = deviceParams->rxChannelB;
             }
+            setTunerFrequency(tunerDT[channel], chParamsDT[channel], frequency);
+         }
+         else
+         {
+            setTunerFrequency(device.tuner, chParams, frequency);
          }
       }
       // can't set ppm for RSPduo slaves
@@ -705,6 +753,37 @@ void SoapySDRPlay::setFrequency(const int direction,
          if (streamActive)
          {
             sdrplay_api_Update(device.dev, device.tuner, sdrplay_api_Update_Dev_Ppm, sdrplay_api_Update_Ext1_None);
+         }
+      }
+   }
+}
+
+void SoapySDRPlay::setTunerFrequency(sdrplay_api_TunerSelectT tuner,
+                                     sdrplay_api_RxChannelParamsT *chParams,
+                                     const double frequency)
+{
+   if (chParams->tunerParams.rfFreq.rfHz != (uint32_t)frequency)
+   {
+      chParams->tunerParams.rfFreq.rfHz = (uint32_t)frequency;
+      if (streamActive)
+      {
+         rf_changed = 0;
+         sdrplay_api_ErrT err = sdrplay_api_Update(device.dev, tuner, sdrplay_api_Update_Tuner_Frf, sdrplay_api_Update_Ext1_None);
+         if (err != sdrplay_api_Success)
+         {
+            SoapySDR_logf(SOAPY_SDR_WARNING, "sdrplay_api_Update(Tuner_FrF) Error: %s", sdrplay_api_GetErrorString(err));
+            return;
+         }
+         for (int i = 0; i < updateTimeout; ++i)
+         {
+            if (rf_changed != 0) {
+               break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+         }
+         if (rf_changed == 0)
+         {
+            SoapySDR_log(SOAPY_SDR_WARNING, "RF center frequency update timeout.");
          }
       }
    }
@@ -722,7 +801,11 @@ double SoapySDRPlay::getFrequency(const int direction, const size_t channel, con
 
     if (name == "RF")
     {
-        return (double)chParams->tunerParams.rfFreq.rfHz;
+        if (hwVer == SDRPLAY_RSPduo_ID && device.rspDuoMode == sdrplay_api_RspDuoMode_Dual_Tuner) {
+           return (double)chParamsDT[channel]->tunerParams.rfFreq.rfHz;
+        } else {
+           return (double)chParams->tunerParams.rfFreq.rfHz;
+        }
     }
     else if (name == "CORR")
     {
@@ -2140,6 +2223,10 @@ void SoapySDRPlay::selectDevice(sdrplay_api_TunerSelectT tuner,
     }
 
     chParams = device.tuner == sdrplay_api_Tuner_B ? deviceParams->rxChannelB : deviceParams->rxChannelA;
+    tunerDT[0] = device.tuner;
+    tunerDT[1] = device.tuner;
+    chParamsDT[0] = chParams;
+    chParamsDT[1] = chParams;
 
     return;
 }
