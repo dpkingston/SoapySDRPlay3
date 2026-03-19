@@ -26,6 +26,7 @@
 
 #include "SoapySDRPlay.hpp"
 #include <iostream>
+#include <time.h>
 
 std::vector<std::string> SoapySDRPlay::getStreamFormats(const int direction, const size_t channel) const
 {
@@ -85,6 +86,23 @@ void SoapySDRPlay::rx_callback(short *xi, short *xq,
     }
     std::lock_guard<std::mutex> lock(stream->mutex);
 
+    // Hardware timestamp: anchor CLOCK_REALTIME once at first callback, then
+    // extend the 32-bit TCXO sample counter to 64 bits for all subsequent calls.
+    if (!stream->time_anchored) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        stream->anchor_wall_ns    = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+        stream->anchor_sample_num = (uint64_t)params->firstSampleNum;
+        stream->prev_firstSampleNum = params->firstSampleNum;
+        stream->time_anchored = true;
+    }
+    if (params->firstSampleNum < stream->prev_firstSampleNum) {
+        stream->sample_epoch++;   // 32-bit counter wrapped
+    }
+    stream->prev_firstSampleNum = params->firstSampleNum;
+    uint64_t extended_first = ((uint64_t)stream->sample_epoch << 32)
+                              | (uint64_t)params->firstSampleNum;
+
     if (gr_changed == 0 && params->grChanged != 0)
     {
         gr_changed = params->grChanged;
@@ -120,6 +138,11 @@ void SoapySDRPlay::rx_callback(short *xi, short *xq,
 
        // notify readStream()
        stream->cond.notify_one();
+    }
+
+    // Record hardware timestamp for this FIFO slot when it starts filling.
+    if (stream->buffs[stream->tail].size() == 0) {
+        stream->buffFirstSampleNums[stream->tail] = extended_first;
     }
 
     // get current fill buffer
@@ -223,6 +246,15 @@ SoapySDRPlay::SoapySDRPlayStream::SoapySDRPlayStream(size_t channel,
     // allocate buffers
     buffs.resize(numBuffers);
     for (auto &buff : buffs) buff.reserve(bufferLength);
+
+    // initialize hardware timestamp fields
+    time_anchored = false;
+    anchor_wall_ns = 0;
+    anchor_sample_num = 0;
+    prev_firstSampleNum = 0;
+    sample_epoch = 0;
+    outputSampleRate = 2000000.0;
+    buffFirstSampleNums.resize(numBuffers, 0);
 }
 
 SoapySDRPlay::SoapySDRPlayStream::~SoapySDRPlayStream()
@@ -270,6 +302,10 @@ SoapySDR::Stream *SoapySDRPlay::setupStream(const int direction,
     {
         sdrplay_stream = new SoapySDRPlayStream(channel, numBuffers, bufferLength);
     }
+
+    // Cache the output sample rate for hardware timestamp ns conversion.
+    sdrplay_stream->outputSampleRate = getSampleRate(SOAPY_SDR_RX, channel);
+
     return reinterpret_cast<SoapySDR::Stream *>(sdrplay_stream);
 }
 
@@ -587,6 +623,17 @@ int SoapySDRPlay::acquireReadBuffer(SoapySDR::Stream *stream,
     // always write to buffs[0] since each stream can have only one rx/channel
     buffs[0] = (void *)sdrplay_stream->buffs[handle].data();
     flags = 0;
+
+    // Compute hardware timestamp from TCXO sample counter.
+    // anchor_wall_ns is set once (at first callback) so this is free of
+    // per-buffer NTP jitter; accuracy is limited only by TCXO stability (~5 ppm).
+    if (sdrplay_stream->time_anchored) {
+        uint64_t buf_sample     = sdrplay_stream->buffFirstSampleNums[handle];
+        double elapsed_samples  = (double)(buf_sample - sdrplay_stream->anchor_sample_num);
+        timeNs = sdrplay_stream->anchor_wall_ns
+                 + (long long)(elapsed_samples * 1e9 / sdrplay_stream->outputSampleRate);
+        flags |= SOAPY_SDR_HAS_TIME;
+    }
 
     sdrplay_stream->head = (sdrplay_stream->head + 1) % numBuffers;
 

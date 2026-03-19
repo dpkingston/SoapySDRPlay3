@@ -362,6 +362,20 @@ public:
 
         // fv
         std::mutex anotherMutex;
+
+        // Hardware timestamp support.
+        // firstSampleNum from the SDRplay API callback is a TCXO-driven 32-bit
+        // counter.  We extend it to 64 bits (sample_epoch tracks wraps) and
+        // capture a single CLOCK_REALTIME anchor at the first callback so all
+        // subsequent buffer timestamps can be derived without further wall-clock
+        // calls, eliminating per-buffer NTP jitter.
+        bool                  time_anchored;
+        int64_t               anchor_wall_ns;     // CLOCK_REALTIME at first callback (ns)
+        uint64_t              anchor_sample_num;  // firstSampleNum at first callback
+        uint32_t              prev_firstSampleNum;
+        uint32_t              sample_epoch;       // high bits for 32-bit counter wrap
+        double                outputSampleRate;   // set by setupStream(); used for ns conversion
+        std::vector<uint64_t> buffFirstSampleNums; // per-FIFO-slot first sample counter
     };
 
     SoapySDRPlayStream *_streams[2];
