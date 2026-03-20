@@ -97,7 +97,16 @@ void SoapySDRPlay::rx_callback(short *xi, short *xq,
         stream->time_anchored = true;
     }
     if (params->firstSampleNum < stream->prev_firstSampleNum) {
-        stream->sample_epoch++;   // 32-bit counter wrapped
+        // Either a natural 32-bit wrap (~2097 s at 2.048 MSPS) or an internal
+        // sdrplay_api reinit that reset firstSampleNum to near zero.  Re-anchor
+        // to wall clock so timestamps remain correct in both cases.  The brief
+        // re-anchor introduces at most one callback-duration (~0.1 ms) jitter,
+        // which is negligible for our TDOA use.
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        stream->anchor_wall_ns    = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+        stream->anchor_sample_num = (uint64_t)params->firstSampleNum;
+        stream->sample_epoch = 0;
     }
     stream->prev_firstSampleNum = params->firstSampleNum;
     uint64_t extended_first = ((uint64_t)stream->sample_epoch << 32)
