@@ -107,6 +107,12 @@ void SoapySDRPlay::rx_callback(short *xi, short *xq,
         stream->anchor_wall_ns    = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
         stream->anchor_sample_num = (uint64_t)params->firstSampleNum;
         stream->sample_epoch = 0;
+        // Invalidate any FIFO slots stamped before this re-anchor.  Their
+        // buffFirstSampleNums values are relative to the old anchor and would
+        // produce wrong timeNs values (e.g. +715 s in the future).  Sentinel
+        // UINT64_MAX tells acquireReadBuffer to skip HAS_TIME for those slots.
+        // The current tail slot (size() == 0) will be re-stamped below.
+        for (auto &fsn : stream->buffFirstSampleNums) fsn = (uint64_t)-1;
     }
     stream->prev_firstSampleNum = params->firstSampleNum;
     uint64_t extended_first = ((uint64_t)stream->sample_epoch << 32)
@@ -636,12 +642,16 @@ int SoapySDRPlay::acquireReadBuffer(SoapySDR::Stream *stream,
     // Compute hardware timestamp from TCXO sample counter.
     // anchor_wall_ns is set once (at first callback) so this is free of
     // per-buffer NTP jitter; accuracy is limited only by TCXO stability (~5 ppm).
+    // Skip slots marked UINT64_MAX: they were stamped before a re-anchor event
+    // and their sample counts are relative to the old anchor.
     if (sdrplay_stream->time_anchored) {
-        uint64_t buf_sample     = sdrplay_stream->buffFirstSampleNums[handle];
-        double elapsed_samples  = (double)(buf_sample - sdrplay_stream->anchor_sample_num);
-        timeNs = sdrplay_stream->anchor_wall_ns
-                 + (long long)(elapsed_samples * 1e9 / sdrplay_stream->outputSampleRate);
-        flags |= SOAPY_SDR_HAS_TIME;
+        uint64_t buf_sample = sdrplay_stream->buffFirstSampleNums[handle];
+        if (buf_sample != (uint64_t)-1) {
+            double elapsed_samples = (double)(buf_sample - sdrplay_stream->anchor_sample_num);
+            timeNs = sdrplay_stream->anchor_wall_ns
+                     + (long long)(elapsed_samples * 1e9 / sdrplay_stream->outputSampleRate);
+            flags |= SOAPY_SDR_HAS_TIME;
+        }
     }
 
     sdrplay_stream->head = (sdrplay_stream->head + 1) % numBuffers;
