@@ -158,7 +158,7 @@ void SoapySDRPlay::rx_callback(short *xi, short *xq,
                 stream->channel,
                 stream->prev_firstSampleNum,
                 params->firstSampleNum);
-        } else {
+        } else if (params->firstSampleNum < ROLLOVER_GUARD) {
             // sdrplay_api periodic counter reset (~every 716 s): firstSampleNum
             // dropped from P (≈1.47 B) to N (≈0) without setting the reset flag.
             // Advance base_extended by (P − N) to keep extended_first continuous:
@@ -174,6 +174,30 @@ void SoapySDRPlay::rx_callback(short *xi, short *xq,
                 stream->channel,
                 stream->prev_firstSampleNum,
                 params->firstSampleNum);
+        } else {
+            // Anomalous counter jump: new is not near zero (new >= ROLLOVER_GUARD),
+            // so this is a hardware glitch (e.g. alternating counter values).
+            // Re-anchor to the current wall clock to bound timestamp error.
+            stream->anomalous_jump_count++;
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            stream->base_extended     = 0;
+            stream->anchor_wall_ns    = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+            stream->anchor_sample_num = (uint64_t)params->firstSampleNum;
+            if (stream->anomalous_jump_count <= 5) {
+                SoapySDR_logf(SOAPY_SDR_WARNING,
+                    "rx_callback ch%zu: anomalous counter jump"
+                    " (prev=%u new=%u diff=%u) -- re-anchoring wall clock (#%u)",
+                    stream->channel,
+                    stream->prev_firstSampleNum,
+                    params->firstSampleNum,
+                    stream->prev_firstSampleNum - params->firstSampleNum,
+                    stream->anomalous_jump_count);
+            } else if (stream->anomalous_jump_count == 6) {
+                SoapySDR_logf(SOAPY_SDR_WARNING,
+                    "rx_callback ch%zu: suppressing further anomalous counter jump warnings",
+                    stream->channel);
+            }
         }
     }
 
@@ -342,6 +366,7 @@ SoapySDRPlay::SoapySDRPlayStream::SoapySDRPlayStream(size_t channel,
     anchor_sample_num = 0;
     prev_firstSampleNum = 0;
     base_extended = 0;
+    anomalous_jump_count = 0;
     outputSampleRate = 2000000.0;   // overwritten by setupStream()
     buffFirstSampleNums.resize(numBuffers, 0);
 }

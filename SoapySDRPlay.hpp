@@ -386,6 +386,7 @@ public:
         uint64_t              anchor_sample_num;  // extended_first at first callback
         uint32_t              prev_firstSampleNum;
         uint64_t              base_extended;      // accumulated epoch offset
+        uint32_t              anomalous_jump_count; // rate-limits anomalous-jump WARNING logs
         double                outputSampleRate;   // set by setupStream(); used for ns conversion
         std::vector<uint64_t> buffFirstSampleNums; // per-FIFO-slot extended_first
     };
