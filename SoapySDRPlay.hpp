@@ -387,6 +387,8 @@ public:
         uint32_t              prev_firstSampleNum;
         uint64_t              base_extended;      // accumulated epoch offset
         uint32_t              anomalous_jump_count; // rate-limits anomalous-jump WARNING logs
+        int64_t               last_anomalous_jump_wall_ns; // wall clock of last anomalous jump (0 = none)
+        uint32_t              last_anomalous_diff;  // diff of previous jump (for pattern detection)
         double                outputSampleRate;   // set by setupStream(); used for ns conversion
         std::vector<uint64_t> buffFirstSampleNums; // per-FIFO-slot extended_first
     };

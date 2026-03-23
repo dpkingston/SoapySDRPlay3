@@ -191,27 +191,60 @@ void SoapySDRPlay::rx_callback(short *xi, short *xq,
             stream->anomalous_jump_count++;
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
-            stream->base_extended     = 0;
-            stream->anchor_wall_ns    = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-            stream->anchor_sample_num = (uint64_t)params->firstSampleNum;
+            int64_t now_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+            uint32_t this_diff = stream->prev_firstSampleNum - params->firstSampleNum;
+
+            // Compute interval since last jump for periodicity diagnosis.
+            // interval_ms = 0 means this is the first jump this session.
+            int64_t interval_ms = (stream->last_anomalous_jump_wall_ns > 0)
+                ? (now_ns - stream->last_anomalous_jump_wall_ns) / 1000000LL
+                : 0;
+            bool diff_consistent = (stream->last_anomalous_diff > 0)
+                && (this_diff == stream->last_anomalous_diff);
+
+            stream->base_extended               = 0;
+            stream->anchor_wall_ns              = now_ns;
+            stream->anchor_sample_num           = (uint64_t)params->firstSampleNum;
+            stream->last_anomalous_jump_wall_ns = now_ns;
+            stream->last_anomalous_diff         = this_diff;
             stream->tail  = 0;
             stream->head  = 0;
             stream->count = 0;
             for (auto &buff : stream->buffs) buff.clear();
             stream->cond.notify_one();
+
             if (stream->anomalous_jump_count <= 5) {
-                SoapySDR_logf(SOAPY_SDR_WARNING,
-                    "rx_callback ch%zu: anomalous counter jump"
-                    " (prev=%u new=%u diff=%u) -- re-anchoring wall clock (#%u)",
-                    stream->channel,
-                    stream->prev_firstSampleNum,
-                    params->firstSampleNum,
-                    stream->prev_firstSampleNum - params->firstSampleNum,
-                    stream->anomalous_jump_count);
+                if (interval_ms > 0) {
+                    SoapySDR_logf(SOAPY_SDR_WARNING,
+                        "rx_callback ch%zu: anomalous counter jump #%u"
+                        " (prev=%u new=%u diff=%u %s)"
+                        " interval=%.3f s -- re-anchoring and flushing FIFO",
+                        stream->channel,
+                        stream->anomalous_jump_count,
+                        stream->prev_firstSampleNum,
+                        params->firstSampleNum,
+                        this_diff,
+                        diff_consistent ? "[same diff as before — systematic]"
+                                        : "[diff changed — check hardware]",
+                        interval_ms / 1000.0);
+                } else {
+                    SoapySDR_logf(SOAPY_SDR_WARNING,
+                        "rx_callback ch%zu: anomalous counter jump #%u"
+                        " (prev=%u new=%u diff=%u)"
+                        " -- re-anchoring and flushing FIFO",
+                        stream->channel,
+                        stream->anomalous_jump_count,
+                        stream->prev_firstSampleNum,
+                        params->firstSampleNum,
+                        this_diff);
+                }
             } else if (stream->anomalous_jump_count == 6) {
                 SoapySDR_logf(SOAPY_SDR_WARNING,
-                    "rx_callback ch%zu: suppressing further anomalous counter jump warnings",
-                    stream->channel);
+                    "rx_callback ch%zu: suppressing further anomalous counter jump warnings"
+                    " (diff=%u %s)",
+                    stream->channel,
+                    this_diff,
+                    diff_consistent ? "systematic" : "varying");
             }
         }
     }
@@ -382,6 +415,8 @@ SoapySDRPlay::SoapySDRPlayStream::SoapySDRPlayStream(size_t channel,
     prev_firstSampleNum = 0;
     base_extended = 0;
     anomalous_jump_count = 0;
+    last_anomalous_jump_wall_ns = 0;
+    last_anomalous_diff = 0;
     outputSampleRate = 2000000.0;   // overwritten by setupStream()
     buffFirstSampleNums.resize(numBuffers, 0);
 }
