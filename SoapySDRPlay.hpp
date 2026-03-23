@@ -235,7 +235,7 @@ public:
      ******************************************************************/
 
     class SoapySDRPlayStream;
-    void rx_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params, unsigned int numSamples, SoapySDRPlayStream *stream);
+    void rx_callback(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params, unsigned int numSamples, unsigned int reset, SoapySDRPlayStream *stream);
 
     void ev_callback(sdrplay_api_EventT eventId, sdrplay_api_TunerSelectT tuner, sdrplay_api_EventParamsT *params);
 

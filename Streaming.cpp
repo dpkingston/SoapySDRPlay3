@@ -59,14 +59,14 @@ static void _rx_callback_A(short *xi, short *xq, sdrplay_api_StreamCbParamsT *pa
                            unsigned int numSamples, unsigned int reset, void *cbContext)
 {
     SoapySDRPlay *self = (SoapySDRPlay *)cbContext;
-    return self->rx_callback(xi, xq, params, numSamples, self->_streams[0]);
+    return self->rx_callback(xi, xq, params, numSamples, reset, self->_streams[0]);
 }
 
 static void _rx_callback_B(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
                            unsigned int numSamples, unsigned int reset, void *cbContext)
 {
     SoapySDRPlay *self = (SoapySDRPlay *)cbContext;
-    return self->rx_callback(xi, xq, params, numSamples, self->_streams[1]);
+    return self->rx_callback(xi, xq, params, numSamples, reset, self->_streams[1]);
 }
 
 static void _ev_callback(sdrplay_api_EventT eventId, sdrplay_api_TunerSelectT tuner,
@@ -79,6 +79,7 @@ static void _ev_callback(sdrplay_api_EventT eventId, sdrplay_api_TunerSelectT tu
 void SoapySDRPlay::rx_callback(short *xi, short *xq,
                                sdrplay_api_StreamCbParamsT *params,
                                unsigned int numSamples,
+                               unsigned int reset,
                                SoapySDRPlayStream *stream)
 {
     if (stream == 0) {
@@ -86,34 +87,101 @@ void SoapySDRPlay::rx_callback(short *xi, short *xq,
     }
     std::lock_guard<std::mutex> lock(stream->mutex);
 
-    // Hardware timestamp: anchor CLOCK_REALTIME once at first callback, then
-    // extend the 32-bit TCXO sample counter to 64 bits for all subsequent calls.
+    // Hardware timestamp management.
+    //
+    // firstSampleNum is a 32-bit counter at the OUTPUT sample rate (2 MSPS
+    // for RSPduo dual-tuner), overflowing every ~2147 s (~36 min).
+    //
+    // We handle three cases:
+    //
+    //   !time_anchored           -- first callback: anchor wall clock silently.
+    //                              sdrplay_api always sends reset=1 here; the
+    //                              FIFO is empty so no flush is needed.
+    //
+    //   reset != 0               -- true API reinit (sdrplay_api_Init called):
+    //                              re-anchor, reset epoch, flush FIFO so Python
+    //                              gets a clean TIMEOUT instead of stale data.
+    //
+    //   reset == 0, new < prev   -- firstSampleNum decreased.  Two sub-cases:
+    //
+    //     (a) True 32-bit overflow: prev was within one callback interval of
+    //         UINT32_MAX.  Increment sample_epoch to extend to 64 bits.
+    //
+    //     (b) sdrplay_api periodic counter reset: the driver reinitialises
+    //         internally every ~716 s, resetting firstSampleNum to near 0
+    //         WITHOUT setting the reset flag.  prev is far from UINT32_MAX.
+    //         Treating this as a rollover falsely adds 2^32/outputSampleRate
+    //         ≈ 2147 s to timeNs while only 716 s have passed -- a cumulative
+    //         +1432 s error per event.  Re-anchor instead.
     if (!stream->time_anchored) {
+        // First callback ever: anchor silently.  The sdrplay_api always sends
+        // reset=1 on the very first callback after Init — that's normal startup
+        // behaviour, not a mid-session reinit.  The FIFO is empty so no flush
+        // is needed regardless of the reset flag.
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         stream->anchor_wall_ns    = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
         stream->anchor_sample_num = (uint64_t)params->firstSampleNum;
         stream->prev_firstSampleNum = params->firstSampleNum;
-        stream->time_anchored = true;
-    }
-    if (params->firstSampleNum < stream->prev_firstSampleNum) {
-        // Either a natural 32-bit wrap (~2097 s at 2.048 MSPS) or an internal
-        // sdrplay_api reinit that reset firstSampleNum to near zero.  Re-anchor
-        // to wall clock so timestamps remain correct in both cases.  The brief
-        // re-anchor introduces at most one callback-duration (~0.1 ms) jitter,
-        // which is negligible for our TDOA use.
+        stream->sample_epoch      = 0;
+        stream->time_anchored     = true;
+    } else if (reset) {
+        // Mid-session reinit: re-anchor and flush the FIFO so Python receives a
+        // clean TIMEOUT instead of stale pre-reinit data with wrong timestamps.
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         stream->anchor_wall_ns    = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
         stream->anchor_sample_num = (uint64_t)params->firstSampleNum;
-        stream->sample_epoch = 0;
-        // Invalidate any FIFO slots stamped before this re-anchor.  Their
-        // buffFirstSampleNums values are relative to the old anchor and would
-        // produce wrong timeNs values (e.g. +715 s in the future).  Sentinel
-        // UINT64_MAX tells acquireReadBuffer to skip HAS_TIME for those slots.
-        // The current tail slot (size() == 0) will be re-stamped below.
-        for (auto &fsn : stream->buffFirstSampleNums) fsn = (uint64_t)-1;
+        stream->prev_firstSampleNum = params->firstSampleNum;
+        stream->sample_epoch      = 0;
+        SoapySDR_logf(SOAPY_SDR_INFO,
+            "rx_callback ch%zu: sdrplay_api reset (firstSampleNum=%u)"
+            " -- re-anchoring wall clock and flushing FIFO",
+            stream->channel, params->firstSampleNum);
+        stream->tail = 0;
+        stream->head = 0;
+        stream->count = 0;
+        for (auto &buff : stream->buffs) buff.clear();
+        stream->cond.notify_one();
+    } else if (params->firstSampleNum < stream->prev_firstSampleNum) {
+        // firstSampleNum went backward.  Distinguish two causes:
+        //
+        //   (a) True 32-bit rollover: prev was within a few callback intervals
+        //       of UINT32_MAX.  Increment sample_epoch.
+        //
+        //   (b) sdrplay_api periodic counter reset (~every 716 s): prev is far
+        //       below UINT32_MAX.  Re-anchor so timeNs stays correct.
+        //
+        // Guard: 16 × bufferElems at 2 MSPS ≈ 33 ms — well above any realistic
+        // inter-callback gap, yet only 0.008 % of the full counter range.
+        const uint32_t ROLLOVER_GUARD = 16 * stream->bufferElems;
+        if (stream->prev_firstSampleNum >= (uint32_t)(0xFFFFFFFFU - ROLLOVER_GUARD)) {
+            // True natural 32-bit rollover: extend the epoch, no flush needed.
+            stream->sample_epoch++;
+            SoapySDR_logf(SOAPY_SDR_INFO,
+                "rx_callback ch%zu: natural 32-bit rollover"
+                " (prev=%u new=%u epoch now %u)",
+                stream->channel,
+                stream->prev_firstSampleNum,
+                params->firstSampleNum,
+                stream->sample_epoch);
+        } else {
+            // sdrplay_api periodic counter reset without reset flag.
+            // Re-anchor wall clock so subsequent timeNs values are correct.
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            stream->anchor_wall_ns    = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+            stream->anchor_sample_num = (uint64_t)params->firstSampleNum;
+            stream->sample_epoch      = 0;
+            SoapySDR_logf(SOAPY_SDR_INFO,
+                "rx_callback ch%zu: sdrplay_api periodic counter reset"
+                " (prev=%u new=%u) -- re-anchoring wall clock",
+                stream->channel,
+                stream->prev_firstSampleNum,
+                params->firstSampleNum);
+        }
     }
+
     stream->prev_firstSampleNum = params->firstSampleNum;
     uint64_t extended_first = ((uint64_t)stream->sample_epoch << 32)
                               | (uint64_t)params->firstSampleNum;
@@ -238,6 +306,18 @@ void SoapySDRPlay::ev_callback(sdrplay_api_EventT eventId, sdrplay_api_TunerSele
             SoapySDR_log(SOAPY_SDR_ERROR, "Master stream has been removed. Stopping.");
             device_unavailable = true;
         }
+        else
+        {
+            SoapySDR_logf(SOAPY_SDR_INFO,
+                "ev_callback: RspDuoModeChange modeChangeType=%d tuner=%d",
+                (int)params->rspDuoModeParams.modeChangeType, (int)tuner);
+        }
+    }
+    else
+    {
+        SoapySDR_logf(SOAPY_SDR_WARNING,
+            "ev_callback: unrecognized eventId=%d tuner=%d",
+            (int)eventId, (int)tuner);
     }
 }
 
@@ -268,7 +348,7 @@ SoapySDRPlay::SoapySDRPlayStream::SoapySDRPlayStream(size_t channel,
     anchor_sample_num = 0;
     prev_firstSampleNum = 0;
     sample_epoch = 0;
-    outputSampleRate = 2000000.0;
+    outputSampleRate = 2000000.0;   // overwritten by setupStream()
     buffFirstSampleNums.resize(numBuffers, 0);
 }
 
@@ -319,6 +399,7 @@ SoapySDR::Stream *SoapySDRPlay::setupStream(const int direction,
     }
 
     // Cache the output sample rate for hardware timestamp ns conversion.
+    // firstSampleNum counts at the output sample rate (after decimation).
     sdrplay_stream->outputSampleRate = getSampleRate(SOAPY_SDR_RX, channel);
 
     return reinterpret_cast<SoapySDR::Stream *>(sdrplay_stream);
@@ -640,18 +721,14 @@ int SoapySDRPlay::acquireReadBuffer(SoapySDR::Stream *stream,
     flags = 0;
 
     // Compute hardware timestamp from TCXO sample counter.
-    // anchor_wall_ns is set once (at first callback) so this is free of
-    // per-buffer NTP jitter; accuracy is limited only by TCXO stability (~5 ppm).
-    // Skip slots marked UINT64_MAX: they were stamped before a re-anchor event
-    // and their sample counts are relative to the old anchor.
+    // anchor_wall_ns is set once per session (or on true API reinit) so this
+    // is free of per-buffer NTP jitter; accuracy limited only by TCXO (~5 ppm).
     if (sdrplay_stream->time_anchored) {
         uint64_t buf_sample = sdrplay_stream->buffFirstSampleNums[handle];
-        if (buf_sample != (uint64_t)-1) {
-            double elapsed_samples = (double)(buf_sample - sdrplay_stream->anchor_sample_num);
-            timeNs = sdrplay_stream->anchor_wall_ns
-                     + (long long)(elapsed_samples * 1e9 / sdrplay_stream->outputSampleRate);
-            flags |= SOAPY_SDR_HAS_TIME;
-        }
+        double elapsed_samples = (double)(buf_sample - sdrplay_stream->anchor_sample_num);
+        timeNs = sdrplay_stream->anchor_wall_ns
+                 + (long long)(elapsed_samples * 1e9 / sdrplay_stream->outputSampleRate);
+        flags |= SOAPY_SDR_HAS_TIME;
     }
 
     sdrplay_stream->head = (sdrplay_stream->head + 1) % numBuffers;
