@@ -154,7 +154,7 @@ void SoapySDRPlay::rx_callback(short *xi, short *xq,
         //
         // Guard: 16 × bufferElems at 2 MSPS ≈ 33 ms — well above any realistic
         // inter-callback gap, yet only 0.008 % of the full counter range.
-        const uint32_t ROLLOVER_GUARD = 16 * stream->bufferElems;
+        const uint32_t ROLLOVER_GUARD = 16 * DEFAULT_BUFFER_LENGTH;
         if (stream->prev_firstSampleNum >= (uint32_t)(0xFFFFFFFFU - ROLLOVER_GUARD)) {
             // True natural 32-bit rollover: extend the epoch, no flush needed.
             stream->sample_epoch++;
