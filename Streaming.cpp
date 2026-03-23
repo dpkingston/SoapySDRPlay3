@@ -177,13 +177,28 @@ void SoapySDRPlay::rx_callback(short *xi, short *xq,
         } else {
             // Anomalous counter jump: new is not near zero (new >= ROLLOVER_GUARD),
             // so this is a hardware glitch (e.g. alternating counter values).
-            // Re-anchor to the current wall clock to bound timestamp error.
+            // Re-anchor to the current wall clock AND flush the FIFO.
+            //
+            // Flushing is essential here (unlike the periodic-reset path):
+            // the periodic reset keeps base_extended continuous so old FIFO
+            // slots still compute the correct timeNs.  An anomalous jump breaks
+            // continuity — it resets base_extended to 0 while slots already in
+            // the FIFO were stamped with the previous (large) base_extended.
+            // Without a flush those slots produce timeNs values wildly in the
+            // future (or past after uint64 wrap), causing a Python error storm.
+            // Flushing them causes Python to receive a clean TIMEOUT instead,
+            // which triggers the existing TIMEOUT-storm close/reopen path.
             stream->anomalous_jump_count++;
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             stream->base_extended     = 0;
             stream->anchor_wall_ns    = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
             stream->anchor_sample_num = (uint64_t)params->firstSampleNum;
+            stream->tail  = 0;
+            stream->head  = 0;
+            stream->count = 0;
+            for (auto &buff : stream->buffs) buff.clear();
+            stream->cond.notify_one();
             if (stream->anomalous_jump_count <= 5) {
                 SoapySDR_logf(SOAPY_SDR_WARNING,
                     "rx_callback ch%zu: anomalous counter jump"
