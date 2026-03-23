@@ -168,7 +168,7 @@ void SoapySDRPlay::rx_callback(short *xi, short *xq,
             // and post-reset slots will compute the same elapsed value.
             stream->base_extended +=
                 (uint64_t)stream->prev_firstSampleNum - (uint64_t)params->firstSampleNum;
-            SoapySDR_logf(SOAPY_SDR_INFO,
+            SoapySDR_logf(SOAPY_SDR_DEBUG,
                 "rx_callback ch%zu: sdrplay_api periodic counter reset"
                 " (prev=%u new=%u) -- adjusting base_extended, no FIFO flush",
                 stream->channel,
