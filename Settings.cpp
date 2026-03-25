@@ -100,7 +100,11 @@ SoapySDRPlay::~SoapySDRPlay(void)
     SoapySDRPlay_getClaimedSerials().erase(cacheKey);
     std::lock_guard <std::mutex> lock(_general_state_mutex);
 
-    releaseDevice();
+    try {
+        releaseDevice();
+    } catch (const std::exception &ex) {
+        SoapySDR_logf(SOAPY_SDR_ERROR, "releaseDevice() failed in destructor: %s", ex.what());
+    }
 
     _streams[0] = 0;
     _streams[1] = 0;
