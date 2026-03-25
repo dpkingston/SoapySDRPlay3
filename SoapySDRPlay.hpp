@@ -417,8 +417,16 @@ public:
         // sdrplay_api_GetDevices() can see the device again.
         void reconnect();
 
+        // Set when a device release fails (sdrplay_api_ServiceNotResponding),
+        // indicating the service was restarted and the session is stale.
+        // Checked by findSDRPlay() to reconnect before calling GetDevices(),
+        // avoiding the ~20s timeout that a stale GetDevices() call would block.
+        void mark_needs_reconnect() { _needs_reconnect = true; }
+        bool needs_reconnect() const { return _needs_reconnect; }
+
     private:
         static float ver;
+        bool _needs_reconnect = false;
         sdrplay_api();
 
     public:

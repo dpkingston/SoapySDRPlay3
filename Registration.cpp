@@ -42,24 +42,23 @@ static std::vector<SoapySDR::Kwargs> findSDRPlay(const SoapySDR::Kwargs &args)
    std::string baseLabel = "SDRplay Dev";
 
    // list devices by API
-   SoapySDRPlay::sdrplay_api::get_instance();
+   {
+      SoapySDRPlay::sdrplay_api &api = SoapySDRPlay::sdrplay_api::get_instance();
+      // If a prior device release failed (sdrplay_api_ServiceNotResponding),
+      // the API session is stale.  Reconnect now, before calling GetDevices(),
+      // to avoid the ~20s timeout a stale GetDevices() call would block on.
+      if (api.needs_reconnect()) {
+         try {
+            api.reconnect();
+         } catch (const std::exception &ex) {
+            ::SoapySDR_logf(SOAPY_SDR_WARNING, "sdrplay_api reconnect failed: %s", ex.what());
+            return results;
+         }
+      }
+   }
    sdrplay_api_LockDeviceApi();
    sdrplay_api_DeviceT rspDevs[SDRPLAY_MAX_DEVICES];
    sdrplay_api_GetDevices(&rspDevs[0], &nDevs, SDRPLAY_MAX_DEVICES);
-
-   // If no devices were found, the sdrplay_api service may have been restarted
-   // since the singleton opened its connection.  Try reconnecting once.
-   if (nDevs == 0) {
-      sdrplay_api_UnlockDeviceApi();
-      try {
-         SoapySDRPlay::sdrplay_api::get_instance().reconnect();
-      } catch (const std::exception &ex) {
-         ::SoapySDR_logf(SOAPY_SDR_WARNING, "sdrplay_api reconnect failed: %s", ex.what());
-         return results;
-      }
-      sdrplay_api_LockDeviceApi();
-      sdrplay_api_GetDevices(&rspDevs[0], &nDevs, SDRPLAY_MAX_DEVICES);
-   }
 
    for (unsigned int i = 0; i < nDevs; i++)
    {

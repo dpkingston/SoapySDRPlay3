@@ -104,6 +104,7 @@ SoapySDRPlay::~SoapySDRPlay(void)
         releaseDevice();
     } catch (const std::exception &ex) {
         SoapySDR_logf(SOAPY_SDR_ERROR, "releaseDevice() failed in destructor: %s", ex.what());
+        SoapySDRPlay::sdrplay_api::get_instance().mark_needs_reconnect();
     }
 
     _streams[0] = 0;

@@ -72,5 +72,6 @@ void SoapySDRPlay::sdrplay_api::reconnect()
         ::SoapySDR_logf(SOAPY_SDR_ERROR, "sdrplay_api reconnect Open() Error: %s", sdrplay_api_GetErrorString(err));
         throw std::runtime_error("sdrplay_api reconnect failed");
     }
+    _needs_reconnect = false;
     ::SoapySDR_logf(SOAPY_SDR_INFO, "sdrplay_api reconnected successfully");
 }
