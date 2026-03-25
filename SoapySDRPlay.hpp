@@ -412,6 +412,10 @@ public:
         {
             return ver;
         }
+        // Re-establish the connection to the sdrplay_api service.
+        // Call this after the service has been restarted so that
+        // sdrplay_api_GetDevices() can see the device again.
+        void reconnect();
 
     private:
         static float ver;

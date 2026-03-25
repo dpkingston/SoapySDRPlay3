@@ -59,3 +59,18 @@ SoapySDRPlay::sdrplay_api::~sdrplay_api()
         ::SoapySDR_logf(SOAPY_SDR_ERROR, "sdrplay_api_Close() failed: %s", sdrplay_api_GetErrorString(err));
     }
 }
+
+void SoapySDRPlay::sdrplay_api::reconnect()
+{
+    sdrplay_api_ErrT err;
+    // Close the stale connection (best-effort; ignore errors since the service
+    // may already be gone or have restarted).
+    sdrplay_api_Close();
+    // Re-open a fresh connection to the (restarted) service.
+    err = sdrplay_api_Open();
+    if (err != sdrplay_api_Success) {
+        ::SoapySDR_logf(SOAPY_SDR_ERROR, "sdrplay_api reconnect Open() Error: %s", sdrplay_api_GetErrorString(err));
+        throw std::runtime_error("sdrplay_api reconnect failed");
+    }
+    ::SoapySDR_logf(SOAPY_SDR_INFO, "sdrplay_api reconnected successfully");
+}
