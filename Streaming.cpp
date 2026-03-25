@@ -252,6 +252,35 @@ void SoapySDRPlay::rx_callback(short *xi, short *xq,
     stream->prev_firstSampleNum = params->firstSampleNum;
     uint64_t extended_first = stream->base_extended + (uint64_t)params->firstSampleNum;
 
+    // Periodic re-anchor: refresh the wall-clock reference every ~10 seconds
+    // to prevent TCXO rate error (typically ±2–5 ppm on RSPduo) from
+    // accumulating into a visible onset_time_ns drift.  At 5 ppm the maximum
+    // drift between re-anchors is 10 s × 5e-6 = 50 µs, well below the
+    // ~100 µs NTP jitter introduced by each clock_gettime() reading.
+    //
+    // Without this, after hours of operation the accumulated drift reaches
+    // hundreds of milliseconds (e.g. 280 ms after 15 h at 5 ppm), which
+    // prevents event pairing with non-HAS_TIME nodes (RTL-SDR freq_hop).
+    if (stream->time_anchored && stream->outputSampleRate > 0) {
+        int64_t elapsed = (int64_t)(extended_first - stream->anchor_sample_num);
+        if (elapsed > 0 && (double)elapsed / stream->outputSampleRate > 10.0) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            int64_t new_wall_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+            // Log the drift that accumulated since the previous anchor.
+            int64_t old_projected_ns = stream->anchor_wall_ns
+                + (long long)((double)elapsed * 1e9 / stream->outputSampleRate);
+            int64_t drift_us = (new_wall_ns - old_projected_ns) / 1000LL;
+            SoapySDR_logf(SOAPY_SDR_DEBUG,
+                "rx_callback ch%zu: re-anchor after %.1f s (TCXO drift %+lld us)",
+                stream->channel,
+                (double)elapsed / stream->outputSampleRate,
+                (long long)drift_us);
+            stream->anchor_wall_ns    = new_wall_ns;
+            stream->anchor_sample_num = extended_first;
+        }
+    }
+
     if (gr_changed == 0 && params->grChanged != 0)
     {
         gr_changed = params->grChanged;
@@ -790,13 +819,20 @@ int SoapySDRPlay::acquireReadBuffer(SoapySDR::Stream *stream,
     flags = 0;
 
     // Compute hardware timestamp from TCXO sample counter.
-    // anchor_wall_ns is set once per session (or on true API reinit) so this
-    // is free of per-buffer NTP jitter; accuracy limited only by TCXO (~5 ppm).
+    // anchor_wall_ns is refreshed every ~10 s in the callback thread to
+    // prevent TCXO drift accumulation; between re-anchors the timestamp is
+    // free of per-buffer NTP jitter, limited only by TCXO stability (~5 ppm).
+    //
+    // The cast to int64_t is essential: after a re-anchor, FIFO buffers
+    // stamped before the anchor have buf_sample < anchor_sample_num, making
+    // the unsigned difference wrap to a huge positive value.  The signed
+    // cast correctly produces a negative elapsed count, giving a timeNs
+    // in the past (before the anchor) as expected.
     if (sdrplay_stream->time_anchored) {
         uint64_t buf_sample = sdrplay_stream->buffFirstSampleNums[handle];
-        double elapsed_samples = (double)(buf_sample - sdrplay_stream->anchor_sample_num);
+        int64_t elapsed_samples = (int64_t)(buf_sample - sdrplay_stream->anchor_sample_num);
         timeNs = sdrplay_stream->anchor_wall_ns
-                 + (long long)(elapsed_samples * 1e9 / sdrplay_stream->outputSampleRate);
+                 + (long long)((double)elapsed_samples * 1e9 / sdrplay_stream->outputSampleRate);
         flags |= SOAPY_SDR_HAS_TIME;
     }
 
